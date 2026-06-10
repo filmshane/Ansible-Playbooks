@@ -1,0 +1,118 @@
+
+---
+- name: Join Linux systems to Windows AD domain
+  hosts: all
+  become: yes
+  vars:
+    domain_name: "corp.jitb.net"
+    source_file: "/root/sssd.conf"   
+    destination_path: "/etc/sssd/"  
+
+  vars_prompt:
+    - name: "domain_admin_user"
+      prompt: "Enter the domain admin username"
+      private: no
+    - name: "domain_admin_password"
+      prompt: "Enter the domain admin password"
+      private: yes
+  
+  tasks:
+    - name: Install required packages (Debian/Ubuntu)
+      apt:
+        name:
+          - realmd
+          - sssd
+          - sssd-ad
+          - adcli
+          - samba-common
+          - samba-common-tools
+          - oddjob
+          - oddjob-mkhomedir
+          - krb5-workstation 
+          - krb5-libs
+          - openldap-clients 
+          - policycoreutils-python
+        state: present
+      when: ansible_os_family == "Debian"
+
+    - name: Install required packages (RHEL/CentOS/OEL)
+      yum:
+        name:
+          - realmd
+          - sssd
+          - sssd-ad
+          - adcli
+          - samba-common
+          - samba-common-tools
+          - oddjob
+          - oddjob-mkhomedir
+          - krb5-workstation 
+          - krb5-libs
+          - openldap-clients 
+          - policycoreutils-python
+        state: present
+      when: ansible_os_family == "RedHat"
+
+    - name: Discover AD domain
+      command: realm discover {{ domain_name }}
+      register: realm_discovery
+      changed_when: false
+
+    - name: Configure Kerberos
+      copy:
+        dest: /etc/krb5.conf
+        content: |
+          [libdefaults]
+              default_realm = {{ domain_name | upper }}
+              dns_lookup_realm = true
+              dns_lookup_kdc = true
+
+    - name: Obtain Kerberos ticket
+      command: >
+        echo "{{ domain_admin_password }}" | kinit {{ domain_admin_user }}@{{ domain_name | upper }}
+      no_log: true
+ 
+    - name: Join the domain
+      ansible.builtin.command: |
+        echo "{{ domain_admin_password }}" | realm join {{ domain_name }} -U {{ domain_admin_user }}
+      no_log: true # Prevent sensitive information from being logged
+      register: join_result
+      failed_when: "'failed to join' in join_result.stderr or join_result.rc != 0 and 'already joined' not in join_result.stderr"
+
+        #    - name: Join domain
+        #expect:
+        #  command: realm join --user= {{ domain_admin_user }} {{ domain_name }}
+        #responses:
+        #  Password for {{ domain_admin_user }}: "{{ domain_admin_password }}"
+        #register: join_result
+
+        # - name: Ensure file is absent
+        #ansible.builtin.file:
+        #path: /etc/sssd/sssd.conf
+        #state: absent
+          
+          #    - name: Copy file to remote server
+          #      copy:
+          # src: "{{ source_file }}"
+          #dest: "{{ destination_path }}"
+          #owner: root
+          #group: root
+          #mode: '0600'
+
+    
+    - name: Change GSSAPIAuthentication value
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^GSSAPIAuthentication\s+\d+'
+        line: 'GSSAPIAuthentication no'
+        backup: yes  
+      notify: restart sssd and sshd
+
+  handlers:
+    - name: restart sssd and sshd
+      service:
+        name: 
+          - sssd
+          - sshd
+        state: restarted
+

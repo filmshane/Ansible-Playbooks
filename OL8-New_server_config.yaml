@@ -1,0 +1,442 @@
+---
+- name: Oracle Linux 8 Server Build Playbook
+  hosts: autotestol8
+  become: true
+  vars:
+    os_major_version: 8
+    files_base_path: "/etc/ansible/FILES/oraclelinux/{{ os_major_version }}"
+    cylance_open_driver_pattern: "CylancePROTECTOpenDriver-*.el8*.rpm"
+    cylance_driver_pattern: "CylancePROTECTDriver-*.el8*.rpm"
+    cylance_protect_pattern: "CylancePROTECT.el8uek.rpm"  # Exact for main Protect (excludes UI)
+    bigfix_pattern: "BESAgent-*.rpm"
+    bigfix_actionsite_pattern: "actionsite.afxm"
+    zabbix_repo_pattern: "*.repo"
+    zabbix_key_pattern: "RPM-GPG-KEY-ZABBIX-*"
+    log_file: "/var/log/New-server-build-{{ ansible_date_time.date }}-{{ ansible_date_time.time | replace(':', '') }}.txt"
+    user_password_hash: "{{ 'This!$JITB!23' | password_hash('sha512') }}"
+
+  pre_tasks:
+    - name: Validate input arguments
+      fail:
+        msg: "Missing or invalid argument: {{ item.var }}"
+      when: vars[item.var] is not defined or vars[item.var] == '' or (item.var == 'hostname' and not vars[item.var] | regex_search(item.regex))
+      loop:
+        - { var: 'hostname', regex: '^[a-zA-Z][a-zA-Z0-9-]*$' }
+        - { var: 'system_ip', regex: none }
+        - { var: 'network', regex: none }
+
+    - name: Set system facts
+      set_fact:
+        hostnm: "{{ hostname }}"
+        sysip: "{{ system_ip }}"
+        netwk: "{{ network }}"
+
+    - name: Create log file
+      file:
+        path: "{{ log_file }}"
+        state: touch
+        mode: '0644'
+
+    - name: Log playbook start
+      lineinfile:
+        path: "{{ log_file }}"
+        line: "{{ item }}"
+        create: yes
+      with_items:
+        - "Playbook started at {{ ansible_date_time.iso8601 }}"
+        - "Hostname: {{ hostnm }}"
+        - "System IP: {{ sysip }}"
+        - "Network: {{ netwk }}"
+
+  tasks:
+    - name: Configure yum proxy
+      lineinfile:
+        path: /etc/yum.conf
+        regexp: '^proxy='
+        line: 'proxy=http://csproxy.corp.jitb.net:9090'
+
+    - name: Install net-tools
+      package:
+        name: net-tools
+        state: present
+
+    - name: Create user accounts
+      user:
+        name: "{{ item.name }}"
+        groups: "{{ item.groups }}"
+        comment: "{{ item.comment }}"
+        password: "{{ user_password_hash }}"
+        update_password: on_create
+        password_expire_max: 90
+        password_expire_min: 1
+      loop:
+        - { name: 'millershuxadmin', groups: 'users,wheel', comment: 'Shane Miller - JITB' }
+        - { name: 'sanapmuxadmin', groups: 'users,wheel', comment: 'Manoj Sanap - Mphasis' }
+        - { name: 'mmanikandanuxadmin', groups: 'users,wheel', comment: 'Manikandan M - Mphasis' }
+
+    - name: Set password expire warning
+      shell: chage -W 14 "{{ item.name }}"
+      loop:
+        - { name: 'millershuxadmin' }
+        - { name: 'sanapmuxadmin' }
+        - { name: 'mmanikandanuxadmin' }
+
+    - name: Update /etc/hosts
+      lineinfile:
+        path: /etc/hosts
+        line: "{{ sysip }} {{ hostnm }}.corp.jitb.net {{ hostnm }}"
+        state: present
+
+    - name: Configure /etc/resolv.conf
+      shell: |
+        echo "Configuring DNS..." | tee -a {{ log_file }}
+        if [ ! -f /root/resolv.conf.bak ]; then
+          mv /etc/resolv.conf /root/resolv.conf.bak
+        fi
+        cat > /etc/resolv.conf << 'EOF'
+        search corp.jitb.net
+        nameserver 10.104.48.21
+        nameserver 10.104.48.22
+        EOF
+      args:
+        executable: /bin/bash
+        warn: false
+
+    - name: Set hostname
+      shell: |
+        echo "Setting hostname..." | tee -a {{ log_file }}
+        if [ ! -f /root/hostname.bak ]; then
+          mv /etc/hostname /root/hostname.bak
+        fi
+        echo "{{ hostnm }}.corp.jitb.net" > /etc/hostname
+        hostnamectl set-hostname "{{ hostnm }}.corp.jitb.net"
+      args:
+        executable: /bin/bash
+        warn: false
+
+    - name: Install and configure chrony
+      block:
+        - name: Install chrony
+          package:
+            name: chrony
+            state: present
+
+        - name: Wait briefly after chrony installation
+          pause:
+            seconds: 5
+
+        - name: Configure chrony
+          shell: |
+            echo "Installing and configuring chrony..." | tee -a {{ log_file }}
+            sed -i '/^pool /d' /etc/chrony.conf
+            if ! grep -q '^server ntp0.corp.jitb.net' /etc/chrony.conf; then
+              cat >> /etc/chrony.conf << 'EOF'
+            server ntp0.corp.jitb.net iburst
+            server ntp1.corp.jitb.net iburst
+            allow ntp0.corp.jitb.net
+            allow ntp1.corp.jitb.net
+            EOF
+            fi
+          args:
+            executable: /bin/bash
+
+        - name: Enable and start chronyd
+          service:
+            name: chronyd
+            state: started
+            enabled: yes
+
+        - name: Set timezone
+          shell: timedatectl set-timezone "America/Los_Angeles"
+          args:
+            creates: /usr/share/zoneinfo/America/Los_Angeles
+
+    - name: Install expect
+      package:
+        name: expect
+        state: present
+
+    - name: Modify /etc/login.defs
+      lineinfile:
+        path: /etc/login.defs
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+      loop:
+        - { regexp: '^PASS_MAX_DAYS', line: 'PASS_MAX_DAYS   90' }
+        - { regexp: '^PASS_MIN_DAYS', line: 'PASS_MIN_DAYS    1' }
+        - { regexp: '^PASS_MIN_LEN', line: 'PASS_MIN_LEN     15' }
+        - { regexp: '^PASS_WARN_AGE', line: 'PASS_WARN_AGE   14' }
+        - { regexp: '^UID_MIN', line: 'UID_MIN                   500' }
+        - { regexp: '^UID_MAX', line: 'UID_MAX                   60000' }
+        - { regexp: '^GID_MIN', line: 'GID_MIN                   500' }
+        - { regexp: '^GID_MAX', line: 'GID_MAX                   60000' }
+
+    - name: Configure /etc/security/pwquality.conf
+      lineinfile:
+        path: /etc/security/pwquality.conf
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+      loop:
+        - { regexp: '^# minlen =', line: 'minlen = 12' }
+        - { regexp: '^# dcredit =', line: 'dcredit = 1' }
+        - { regexp: '^# ucredit =', line: 'ucredit = 1' }
+        - { regexp: '^# lcredit =', line: 'lcredit = 1' }
+        - { regexp: '^# ocredit =', line: 'ocredit = 1' }
+
+    - name: Patch system
+      yum:
+        name: '*'
+        state: latest
+        exclude: kernel*
+
+    - name: Disable firewalld
+      shell: |
+        echo "Disabling firewalld..." | tee -a {{ log_file }}
+        systemctl stop firewalld
+        systemctl disable firewalld
+      args:
+        executable: /bin/bash
+      ignore_errors: yes
+
+    - name: Disable SELinux
+      selinux:
+        state: disabled
+
+    - name: Find Cylance open driver RPM
+      find:
+        paths: "{{ files_base_path }}"
+        patterns: "{{ cylance_open_driver_pattern }}"
+      register: cylance_open_files
+      delegate_to: localhost
+      run_once: true
+
+    - name: Find Cylance driver RPM
+      find:
+        paths: "{{ files_base_path }}"
+        patterns: "{{ cylance_driver_pattern }}"
+      register: cylance_driver_files
+      delegate_to: localhost
+      run_once: true
+
+    - name: Find Cylance protect RPM
+      find:
+        paths: "{{ files_base_path }}"
+        patterns: "{{ cylance_protect_pattern }}"
+      register: cylance_protect_files
+      delegate_to: localhost
+      run_once: true
+
+    - name: Extract RPM versions for validation
+      shell: rpm -qp --qf '%{VERSION}-%{RELEASE}' "{{ item.files[0].path }}"
+      loop:
+        - { name: 'OpenDriver', files: "{{ cylance_open_files.files }}" }
+        - { name: 'Driver', files: "{{ cylance_driver_files.files }}" }
+        - { name: 'Protect', files: "{{ cylance_protect_files.files }}" }
+      register: rpm_versions
+      when: 
+        - "{{ item.files is defined and item.files | length > 0 }}"
+      loop_control:
+        loop_var: item
+
+    - name: Validate Cylance RPM versions match
+      fail:
+        msg: |
+          Cylance RPM versions mismatch!
+          - OpenDriver: {{ rpm_versions.results[0].stdout if rpm_versions.results[0] is defined else 'Missing' }}
+          - Driver: {{ rpm_versions.results[1].stdout if rpm_versions.results[1] is defined else 'Missing' }}
+          - Protect: {{ rpm_versions.results[2].stdout if rpm_versions.results[2] is defined else 'Missing' }}
+          Download matching UEK versions (e.g., all 3.2.1101-4372.el8uek) from Cylance console.
+      when: 
+        - rpm_versions.results is defined
+        - rpm_versions.results | length == 3
+        - rpm_versions.results[0].stdout != rpm_versions.results[1].stdout or rpm_versions.results[1].stdout != rpm_versions.results[2].stdout
+
+    - name: Create Cylance directory
+      file:
+        path: /opt/cylance
+        state: directory
+        mode: '0755'
+      when: cylance_open_files.files is defined and cylance_open_files.files | length > 0
+
+    - name: Create Cylance config_defaults.txt
+      copy:
+        dest: /opt/cylance/config_defaults.txt
+        content: |
+          InstallToken=Ss0lNIJl8EOcxGz1LGRn9Hxv
+          SelfProtectionLevel=2
+          LogLevel=2
+          VenueZone=SERV_LINUX
+          UiMode=1
+        mode: '0644'
+      when: cylance_open_files.files is defined and cylance_open_files.files | length > 0
+
+    - name: Copy Cylance Open Driver RPM to remote
+      copy:
+        src: "{{ cylance_open_files.files[0].path }}"
+        dest: "/tmp/{{ cylance_open_files.files[0].path | basename }}"
+      when: cylance_open_files.files is defined and cylance_open_files.files | length > 0
+
+    - name: Install Cylance Open Driver
+      yum:
+        name: "/tmp/{{ cylance_open_files.files[0].path | basename }}"
+        state: present
+        disable_gpg_check: yes
+      when: cylance_open_files.files is defined and cylance_open_files.files | length > 0
+
+    - name: Copy Cylance Driver RPM to remote
+      copy:
+        src: "{{ cylance_driver_files.files[0].path }}"
+        dest: "/tmp/{{ cylance_driver_files.files[0].path | basename }}"
+      when: cylance_driver_files.files is defined and cylance_driver_files.files | length > 0
+
+    - name: Install Cylance Driver
+      yum:
+        name: "/tmp/{{ cylance_driver_files.files[0].path | basename }}"
+        state: present
+        disable_gpg_check: yes
+      when: cylance_driver_files.files is defined and cylance_driver_files.files | length > 0
+
+    - name: Copy Cylance Protect RPM to remote
+      copy:
+        src: "{{ cylance_protect_files.files[0].path }}"
+        dest: "/tmp/{{ cylance_protect_files.files[0].path | basename }}"
+      when: cylance_protect_files.files is defined and cylance_protect_files.files | length > 0
+
+    - name: Install Cylance Protect
+      yum:
+        name: "/tmp/{{ cylance_protect_files.files[0].path | basename }}"
+        state: present
+        disable_gpg_check: yes
+      when: cylance_protect_files.files is defined and cylance_protect_files.files | length > 0
+
+    - name: Enable and start Cylance service
+      service:
+        name: cylancesvc
+        state: started
+        enabled: yes
+
+    - name: Check Cylance log
+      shell: |
+        if [ -d /opt/cylance/desktop/log ]; then
+          cd /opt/cylance/desktop/log
+          LOG_FILE=$(ls -t | head -1 2>/dev/null || echo "No logs")
+          echo "Current log file: $LOG_FILE" | tee -a {{ log_file }}
+          if [ "$LOG_FILE" != "No logs" ]; then
+            tail -n 50 "$LOG_FILE" | tee -a {{ log_file }}
+          fi
+        else
+          echo "Cylance log directory not found" | tee -a {{ log_file }}
+        fi
+      args:
+        executable: /bin/bash
+      when: cylance_open_files.files is defined and cylance_open_files.files | length > 0
+
+    - name: Find BigFix RPM
+      find:
+        paths: "{{ files_base_path }}"
+        patterns: "{{ bigfix_pattern }}"
+      register: bigfix_files
+      delegate_to: localhost
+      run_once: true
+
+    - name: Find BigFix actionsite.afxm
+      find:
+        paths: "{{ files_base_path }}"
+        patterns: "{{ bigfix_actionsite_pattern }}"
+      register: bigfix_actionsite_files
+      delegate_to: localhost
+      run_once: true
+
+    - name: Create BigFix directory
+      file:
+        path: /etc/opt/BESClient
+        state: directory
+        mode: '0755'
+      when: bigfix_files.files is defined and bigfix_files.files | length > 0
+
+    - name: Copy BigFix actionsite.afxm
+      copy:
+        src: "{{ bigfix_actionsite_files.files[0].path }}"
+        dest: /etc/opt/BESClient/actionsite.afxm
+        mode: '0644'
+      when: bigfix_actionsite_files.files is defined and bigfix_actionsite_files.files | length > 0
+
+    - name: Copy BigFix RPM
+      copy:
+        src: "{{ bigfix_files.files[0].path }}"
+        dest: "/etc/opt/BESClient/BESAgent.rpm"
+        mode: '0775'
+      when: bigfix_files.files is defined and bigfix_files.files | length > 0
+
+    - name: Install BigFix RPM
+      yum:
+        name: "/etc/opt/BESClient/BESAgent.rpm"
+        state: present
+        disable_gpg_check: yes
+      when: bigfix_files.files is defined and bigfix_files.files | length > 0
+
+    - name: Start BigFix service
+      service:
+        name: besclient
+        state: started
+        enabled: yes
+      ignore_errors: yes
+
+    - name: Find Zabbix repo files
+      find:
+        paths: "{{ files_base_path }}"
+        patterns: "{{ zabbix_repo_pattern }}"
+      register: zabbix_repo_files
+      delegate_to: localhost
+      run_once: true
+
+    - name: Copy Zabbix repo files
+      copy:
+        src: "{{ item.path }}"
+        dest: "/etc/yum.repos.d/{{ item.path | basename }}"
+      loop: "{{ zabbix_repo_files.files }}"
+      when: zabbix_repo_files.files is defined and zabbix_repo_files.files | length > 0
+
+    - name: Find Zabbix key files
+      find:
+        paths: "{{ files_base_path }}"
+        patterns: "{{ zabbix_key_pattern }}"
+      register: zabbix_key_files
+      delegate_to: localhost
+      run_once: true
+
+    - name: Copy Zabbix key files
+      copy:
+        src: "{{ item.path }}"
+        dest: "/etc/pki/rpm-gpg/{{ item.path | basename }}"
+      loop: "{{ zabbix_key_files.files }}"
+      when: zabbix_key_files.files is defined and zabbix_key_files.files | length > 0
+
+    - name: Install Zabbix agent
+      yum:
+        name: zabbix-agent
+        state: present
+      ignore_errors: yes
+
+    - name: Enable and start Zabbix agent
+      service:
+        name: zabbix-agent
+        state: started
+        enabled: yes
+      ignore_errors: yes
+
+    - name: Configure Zabbix agent
+      lineinfile:
+        path: /etc/zabbix/zabbix_agentd.conf
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+      loop:
+        - { regexp: '^Server=', line: 'Server=10.103.3.183,10.104.48.51' }
+        - { regexp: '^ServerActive=', line: 'ServerActive=10.103.3.183,10.104.48.51' }
+      ignore_errors: yes
+
+  post_tasks:
+    - name: Reboot the system
+      reboot:
+        msg: "Reboot initiated by Ansible"
+        reboot_timeout: 300

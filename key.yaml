@@ -1,0 +1,11 @@
+---
+- name: Add a line to the end of a file
+  hosts: all # Replace with your target host(s) or group
+  tasks:
+    - name: Ensure a specific line exists at the end of the file
+      ansible.builtin.lineinfile:
+        path: /home/ansible/.ssh/authorized_keys # Replace with the actual file path
+        line: "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCL/qBtJNuySsubzZ2ffUceLbp9loxZRrvLgJOWSNvHfzMGnOXnAGDZQpEHJcfpVimPaqJa2grxP8xeOFlbYIJFQkaCxbSoM5zJbBuEEb3oRtCwLqllaMs2Jnxc8Shqmf0OmtqMz/iuI7zbIfxEW9pogyau52W8/S4FZuprWSBINv8xWq8ZUYVlVP1v15m1x3P7MaJjKrN+/P0Blkp2qT6CC7uHOMxKppVyv/JOQn49BRocQ9QjoCPGzshFGPP2WJ7JP1yf+lnVYbxqauvCVp9x3HqiUzOa7WNRSFa9EarGDIsexCN5u/b03sUe/BRHk0+Cvwg2NxjF4tWFWECeDaU6hLwgmhdy8qke4Hbgs3gG425t97C1QRzKec+WADMR/rC0QEYA951+PrhyxLh8Z/LvRLgddDa/N03Agh4Rq87zJ4NWqEHW1duCInFRBu53Zxkr/YczmWAWzDrms8cHDOuNJbzbSK3RdhWJA1E2H/XjqIYVQdA8VFProm4qedgfnQM= ansible@ansibletestbuild"
+        insertafter: EOF
+        create: true # Set to true if you want to create the file if it doesn't
+

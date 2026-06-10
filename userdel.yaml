@@ -1,0 +1,26 @@
+---
+- name: Remove user from system
+  hosts: all
+  become: yes
+  vars_prompt:
+    - name: username
+      prompt: "Enter the username to remove"
+      private: no
+
+  tasks:
+    - name: Attempt to remove the user
+      block:
+        - name: Remove the user
+          ansible.builtin.user:
+            name: "{{ username }}"
+            state: absent
+            remove: yes
+            force: yes
+      rescue:
+        - name: Handle failure
+          ansible.builtin.debug:
+            msg: "Failed to remove user '{{ username }}'. It may not exist or there was an error."
+      always:
+        - name: Always run this
+          ansible.builtin.debug:
+            msg: "User removal process completed."

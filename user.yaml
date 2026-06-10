@@ -1,0 +1,13 @@
+---
+- name: user module Playbook
+  hosts: all
+  become: true
+  vars:
+    myuser: "millershuxadmin"
+    mypassword: "What!$thisforExactly!23"
+  tasks:
+    - name: change password
+      ansible.builtin.user:
+        name: "{{ myuser }}"
+        state: present
+        password: "{{ mypassword | password_hash('sha512') }}"

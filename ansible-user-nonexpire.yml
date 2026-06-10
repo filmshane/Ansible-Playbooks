@@ -1,0 +1,42 @@
+---
+- name: Ensure Ansible user account never expires
+  hosts: all
+  become: true
+  vars:
+    target_user: ansible  # Change this to the actual username if different
+
+  tasks:
+    - name: Gather system facts
+      ansible.builtin.setup:
+        filter:
+          - 'ansible_distribution'
+          - 'ansible_distribution_major_version'
+
+    - name: Check current account expiration
+      ansible.builtin.command: chage -l {{ target_user }}
+      register: chage_output
+      changed_when: false
+      failed_when: false  # Allow continuation even if user doesn't exist or command fails
+
+    - name: Parse account expiration date
+      ansible.builtin.set_fact:
+        account_expiry: "{{ chage_output.stdout | regex_findall('Account expires\\s+:\\s+(.*)') | first | default('unknown') | trim }}"
+      when: chage_output.rc == 0
+
+    - name: Set account expiration to never (using chage)
+      ansible.builtin.command: chage -E -1 {{ target_user }}
+      when:
+        - chage_output.rc == 0
+        - account_expiry != 'never'
+      register: set_expiry
+      changed_when: set_expiry.rc == 0
+
+    - name: Debug system version and changes
+      ansible.builtin.debug:
+        msg: "System: {{ ansible_distribution }} {{ ansible_distribution_major_version }}. Account expiry was '{{ account_expiry }}' and set to 'never' if needed."
+      when: chage_output.rc == 0
+
+    - name: Handle failure if chage not available or user issue
+      ansible.builtin.debug:
+        msg: "chage command failed (rc: {{ chage_output.rc }}). This playbook relies on chage, which is standard on most Linux distributions (RHEL/CentOS, Ubuntu/Debian). Ensure shadow-utils is installed."
+      when: chage_output.rc != 0

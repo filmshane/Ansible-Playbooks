@@ -1,0 +1,30 @@
+---
+- name: Search for users by first and last name and generate master report
+  hosts: all
+  gather_facts: false
+  vars:
+    first_name: "{{ first_name }}"  # Pass via --extra-vars 'first_name=John last_name=Doe'
+    last_name: "{{ last_name }}"
+    report_path: /tmp/master_report.txt
+
+  tasks:
+    - name: Create or empty the master report file
+      copy:
+        content: ""
+        dest: "{{ report_path }}"
+      delegate_to: localhost
+      run_once: true
+
+    - name: Find matching users in /etc/passwd
+      shell: |
+        grep -i "{{ first_name }}" /etc/passwd | cut -d: -f1 | tr '\n' ', ' | sed 's/,$//'
+        grep -i "{{ last_name }}" /etc/passwd | cut -d: -f1 | tr '\n' ', ' | sed 's/,$//'
+      register: found_users
+      ignore_errors: true
+      changed_when: false
+
+    - name: Append results to master report
+      lineinfile:
+        path: "{{ report_path }}"
+        line: "{{ inventory_hostname }}: {{ found_users.stdout | default('No match') }}"
+      delegate_to: localhost

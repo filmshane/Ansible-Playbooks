@@ -1,0 +1,35 @@
+---
+- name: Create user on system
+  hosts: all
+  become: yes
+  vars_prompt:
+    - name: username
+      prompt: "Enter the username to create"
+      private: no
+    - name: password
+      prompt: "Enter the password for the user"
+      private: yes
+
+  tasks:
+    - name: Attempt to create the user
+      block:
+        - name: Create the user
+          ansible.builtin.user:
+            name: "{{ username }}"
+            state: present
+            create_home: yes
+            password: "{{ password | password_hash('sha512') }}"
+
+        - name: Add user to sudo group
+          ansible.builtin.user:
+            name: "{{ username }}"
+            groups: sudo
+            append: yes
+      rescue:
+        - name: Handle failure
+          ansible.builtin.debug:
+            msg: "Failed to create user '{{ username }}'. It may already exist or there was an error."
+      always:
+        - name: Always run this
+          ansible.builtin.debug:
+            msg: "User creation process completed."
